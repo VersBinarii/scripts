@@ -1,0 +1,152 @@
+#!/usr/bin/expect
+
+#####################################################################
+##                                                                 ##
+## author: Krzysztof Grobelak                                      ##
+## version: 0.0.6                                                  ##
+## script for login to a range of devices specified                ##
+## by the given query and executing a bunch of specified commands  ##
+##                                                                 ##
+#####################################################################
+
+
+# passed arguments
+
+set commit_confirmed [lindex $argv 0]
+
+set commit_time 3
+
+if { $commit_confirmed == "-c" } {
+    send_user "Will run with commit confirmed timout of: $commit_time s!!\n"
+}
+
+# user credentials definitions              
+set username "kgrobelak"
+set password "xeeViul9\r"
+
+# script config       
+set timeout 30
+#exp_internal 1
+
+
+# commands definitions
+
+#delete wrong radius server command 
+set delete_radius_cmd "delete system radius-server 172.30.255.2\r"
+set delete_radius_cmd_again "delete system radius-server 172.30.255.5\r"
+set set_new_radius_server "set system radius-server 172.30.255.98 secret \"\$9\$uNWq0RS8LN24ZrlK8xN2gP5QznCIRclvW9ABESy8Ls24oUHQz6\" timeout 5 source-address"
+
+# postgres query to obtain all IP's
+set postgres_query "select ipaddr from ipinterface join node on ipinterface.nodeid = (select node.nodeid where node.nodesysoid like '.1.3.6.1.4.1.2636.%') where issnmpprimary = 'P';\r"
+
+
+# default function definitions
+
+proc abort {} {
+    send "\nSession over\n"
+    exit 1
+}
+# this will log into specified node and do its magik
+proc setNewRadiusServer { nodeIp } {
+    global set_new_radius_server
+    global delete_radius_cmd
+	global delete_radius_cmd_again
+    global commit_confirmed
+    global commit_time
+    global username
+    global password
+
+    spawn ssh -q -o StrictHostKeyChecking=no $username@$nodeIp
+
+    expect {
+		eof { 
+			send_user "\nERROR - $nodeIp did not promped for password!!\n"
+			return "continue"
+		}
+		timeout { 
+			send_user "\nERROR - $nodeIp did not ask for password!!!\n"
+			exp_continue 
+		}
+        "*assword:" { send $password }
+    }
+
+    expect {
+		"*assword:" { 
+			send_user "\nERROR - ssh airspeed@$nodeIp wrong password!!!\nPROBABLY NO RADIUS CONFIG!!\n"
+			return "continue"
+		}
+        "*>" { send "edit\r" }
+		timeout {
+			send_user "\nERROR - ssh airspeed@$nodeIp does not like password!!!\n"
+			return "continue"
+		}
+    }
+
+    send_user "we in edit mode\n"
+
+# here we can specyfy the commands that we want to execute
+# i may modularise it a bit at some later stage so its multi purpose
+   # expect {
+   #     "*#" { send $delete_radius_cmd }
+   # }
+#	expect {
+#		"*#" { send $delete_radius_cmd_again }
+#	}
+#    expect {
+#        "*#" { send "$set_new_radius_server $nodeIp\r" }
+#    }
+
+	expect {
+        "*#" { send "set system radius-server 172.30.255.6 timeout 3\r" }
+    }
+
+	expect {
+        "*#" { send "set system radius-server 172.30.255.98 timeout 3\r" }
+    }
+
+    expect {
+        "*#" {
+            if { $commit_confirmed == "-c" } {
+                send "commit confirmed $commit_time\r"
+            } else {
+                send "commit\r"
+            }
+            expect {
+                "*#" {
+                    send "exit\rexit\r"
+                    send_user "Done!\n"
+                }
+            }
+        }
+    }
+    send_user "Finished and disconnected\n"
+}
+
+# will return a list of ip's from givenn query
+proc findAllNodes {query} {
+
+    set ipList ""
+    spawn -noecho psql -At -P pager=off -U opennms -c $query
+
+    expect {
+        "*\n" {
+            foreach ip [split $expect_out(buffer) "\n\r"] {
+                if { [string match "*.*.*.*" $ip] } {
+                    lappend ipList $ip;
+                }
+            }
+            return $ipList;
+        }
+    }
+}
+
+# main                                                                                                                                                          
+set ipList [ findAllNodes $postgres_query ]
+
+
+foreach ipaddr $ipList {
+    send_user "Setting: $ipaddr\n"
+    if { [setNewRadiusServer $ipaddr] == "continue" } {
+		continue;
+	}
+}
