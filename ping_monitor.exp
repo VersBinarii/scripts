@@ -1,0 +1,128 @@
+#!/usr/bin/expect -f
+
+#agent IP
+set thn_sw ""
+
+# login username 
+set user "collector"
+set servicename "PingMonitor"
+
+#same pass for thn_sw, cisco auth and cisco enable
+set pass "" 
+
+
+#set debugging stuff
+set timeout 15
+#exp_internal 1
+
+
+## basic abort function
+proc abort {} {
+    send_user "\nSession aborted\n"
+    exit 1
+}
+
+#we need to log into the thn_sw and check if the site switches are reachable
+
+## this function will obtain from NMS db all the IP's associated
+##with the given group
+proc getAllIP {} {
+	global servicename
+    set ip_list ""
+
+    spawn -noecho psql -At -U opennms -c "select distinct ifservices.ipaddr from ifservices,node,service where (ifservices.nodeid=node.nodeid and ifservices.serviceid=service.serviceid and node.foreignsource='$servicename');\r"
+
+    expect {
+        "*\n" {
+            foreach ip [split $expect_out(buffer) "\r\n"] {
+                if { [string match "*.*.*.*" $ip] } {
+                    lappend ip_list $ip
+                }
+            }
+            return $ip_list;
+        }
+    }
+}
+
+##and this beautifull function obtains name of the node associated with the given IP
+proc getNodeName {ipaddr} {
+	global servicename
+
+    spawn -noecho psql -At -U opennms -c "select distinct node.nodelabel from ifservices,node,service where (ifservices.nodeid=node.nodeid and ifservices.serviceid=service.serviceid and node.foreignsource='$servicename' and ifservices.ipaddr='$ipaddr');\r"
+    expect {
+        "*\n" {
+            foreach nname [split $expect_out(buffer) " "] {
+                if { [string match "access.node*" $nname] } {
+                    return [string trim $nname "\r\n"]
+                }
+            }
+        }
+    }
+}
+
+proc checkNode {userip} {
+#	set search "show bgp neighbor "
+#	set search_cmd [concat $search $userip]
+	global servicename
+
+	exp_send "ping $userip count 1 routing-instance <instance_name>-L3VPN\n"
+
+	expect {
+		-re "(\[0-9\]\[0-9\]) bytes .*" {
+			##handle if up
+			send_user "\nINFO: Setting unit $userip as up\n"
+
+            set oui "uei.opennms.org/services/passiveServiceStatus"
+            set host "localhost"
+
+            send_user [ exec perl /opt/opennms/bin/send-event.pl $oui $host \
+            --interface $userip \
+            --service "$servicename" \
+            --parm "passiveNodeLabel [getNodeName $userip]" \
+            --parm "passiveIpAddr $userip" \
+            --parm "passiveServiceName $servicename" \
+            --parm "passiveStatus Up"]
+
+            send_user "\nINFO: Unit set as Up\n"
+		}
+
+		default {
+			##handle as down
+			send_user "\nINFO: Setting unit $userip as down\n"
+
+            set oui "uei.opennms.org/services/passiveServiceStatus"
+            set host "localhost"
+
+            send_user [ exec perl /opt/opennms/bin/send-event.pl $oui $host \
+            --interface $userip \
+            --service "$servicename" \
+            --parm "passiveNodeLabel [getNodeName $userip]" \
+            --parm "passiveIpAddr $userip" \
+            --parm "passiveServiceName $servicename" \
+            --parm "passiveStatus Down"]
+
+            send_user "\nWARNING: Unit set as down\n"
+		}
+	}
+}
+
+
+spawn ssh -q -o StrictHostKeyChecking=no $user@$thn_sw
+
+expect {
+	"*assword:" { exp_send "$pass\r" }
+	default abort
+}
+
+expect {
+	"*>" {
+		send_user "DEBUG: We are now in enable mode!!!\n"
+		set iplist [getAllIP]
+		foreach ipaddr $iplist {
+			checkNode $ipaddr
+		}
+		exp_send "\nINFO: Exit\n"
+		send_user "Logged out of the juniper sw...\n"
+	}
+	default abort
+}
